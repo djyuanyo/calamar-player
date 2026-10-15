@@ -93,7 +93,7 @@ public class MainActivity extends Activity {
       browserLayout.addView(bar,new LinearLayout.LayoutParams(-1,-2));
       video=new WebView(this);
       WebSettings w=video.getSettings();w.setJavaScriptEnabled(true);w.setDomStorageEnabled(true);
-      w.setJavaScriptCanOpenWindows(false);w.setSupportMultipleWindows(false);
+      w.setJavaScriptCanOpenWindowsAutomatically(false);w.setSupportMultipleWindows(false);
       w.setMediaPlaybackRequiresUserGesture(true);
       w.setAllowFileAccess(false);
       w.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
