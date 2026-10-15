@@ -44,6 +44,17 @@ public class MainActivity extends Activity {
               parts.push(n.src||n.href||'');
             });
             try { performance.getEntriesByType('resource').forEach(function(n){parts.push(n.name)}); }catch(e){}
+            try {
+              document.querySelectorAll('iframe').forEach(function(frame){
+                try {
+                  var doc=frame.contentDocument;
+                  if(doc && doc.documentElement){
+                    doc.querySelectorAll('video,source,a').forEach(function(n){parts.push(n.currentSrc||n.src||n.href||'')});
+                    parts.push(doc.documentElement.outerHTML.slice(0,200000));
+                  }
+                }catch(e){}
+              });
+            }catch(e){}
             var html=document.documentElement.outerHTML.slice(0,1200000);
             parts.push(html.replace(/\\\\\\//g,'/').replace(/&amp;/g,'&'));
             var re=/https?:\\/\\/[^\\s"'<>\\[\\]{}\\\\]+/ig;
@@ -95,6 +106,18 @@ public class MainActivity extends Activity {
       WebSettings w=video.getSettings();w.setJavaScriptEnabled(true);w.setDomStorageEnabled(true);
       w.setJavaScriptCanOpenWindowsAutomatically(false);w.setSupportMultipleWindows(false);
       w.setMediaPlaybackRequiresUserGesture(true);
+      // Algunos reproductores incrustados en páginas PHP rechazan el sufijo "wv" del navegador.
+      try{w.setUserAgentString(w.getUserAgentString().replace("; wv",""));}catch(Exception ignored){}
+      // Las listas HLS pueden cargarse desde iframes y service workers.
+      if(Build.VERSION.SDK_INT>=24)try{
+        ServiceWorkerController.getInstance().setServiceWorkerClient(new ServiceWorkerClient(){
+          @Override public WebResourceResponse shouldInterceptRequest(WebResourceRequest req){
+            String u=req.getUrl().toString();
+            if(isStream(u))handler.post(()->record(u,"Reproductor incrustado"));
+            return null;
+          }
+        });
+      }catch(Exception ignored){} 
       w.setAllowFileAccess(false);
       w.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
       if(Build.VERSION.SDK_INT>=26)w.setSafeBrowsingEnabled(true);
@@ -125,7 +148,7 @@ public class MainActivity extends Activity {
       root.removeView(ui);
       if(browserLayout.getParent() instanceof ViewGroup)((ViewGroup)browserLayout.getParent()).removeView(browserLayout);
       root.addView(browserLayout,new LinearLayout.LayoutParams(-1,-1));
-      message.setText("Reproduce el vídeo · buscando M3U");
+      message.setText("Reproduce el vídeo · buscando M3U/M3U8");
       video.loadUrl(url);handler.postDelayed(scanLoop,2800);
     }
     private void inspect(){
@@ -141,7 +164,7 @@ public class MainActivity extends Activity {
       });
     }
     private void record(String url,String source){
-      if(!scanning||!isStream(url)||!found.add(url))return;
+      if(!scanning||!isStream(url)||found.size()>=400||!found.add(url))return;
       try{
         JSONObject obj=new JSONObject();
         obj.put("url",url);obj.put("name",title.substring(0,Math.min(170,title.length())));
