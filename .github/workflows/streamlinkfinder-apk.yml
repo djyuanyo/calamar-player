@@ -1,0 +1,38 @@
+name: Compilar StreamLink Finder APK
+on:
+  push:
+    branches: [streamlinkfinder-apk-20261015]
+permissions:
+  contents: write
+jobs:
+  apk:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Instalar Android SDK
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Compilar APK
+        run: cd StreamLinkFinder && gradle --no-daemon assembleDebug
+      - name: Guardar APK en rama independiente
+        run: |
+          cp StreamLinkFinder/app/build/outputs/apk/debug/app-debug.apk StreamLinkFinder.apk
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add StreamLinkFinder.apk
+          git commit -m "APK StreamLink Finder compilada" || true
+          git push origin HEAD:streamlinkfinder-apk-20261015
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StreamLinkFinder-APK
+          path: StreamLinkFinder.apk
