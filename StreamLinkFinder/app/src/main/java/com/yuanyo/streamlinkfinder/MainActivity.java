@@ -30,11 +30,12 @@ public class MainActivity extends Activity {
     private static final Pattern STREAM=Pattern.compile("\\.m3u8?(?:$|[?#/&])",Pattern.CASE_INSENSITIVE);
     private LinearLayout root,browserLayout;
     private WebView ui,video;
+    private android.widget.FrameLayout fullScreenFrame;
+    private WebChromeClient.CustomViewCallback videoFullscreenCallback;
     private TextView message;
     private Button adToggle;
     private volatile boolean adBlockEnabled=true;
     private int adsBlocked=0;
-    private String startHost="";
     // Solo bloquear redes publicitarias conocidas; los CDN de vídeo no se filtran por nombre.
     private static final String[] AD_DOMAINS={
       "doubleclick.net","googlesyndication.com","googleadservices.com","googletagservices.com",
@@ -116,19 +117,13 @@ public class MainActivity extends Activity {
       if(adToggle==null)return;
       adToggle.setText(adBlockEnabled?"🛡 ANUNCIOS: ON ("+adsBlocked+")":"🛡 ANUNCIOS: OFF");
     }
-    private boolean offsiteNavigation(Uri uri){
-      String host=uri.getHost();
-      if(host==null||startHost.isEmpty())return false;
-      host=host.toLowerCase(Locale.ROOT);
-      return !(host.equals(startHost)||host.endsWith("."+startHost)||startHost.endsWith("."+host));
-    }
     private static final String ANTI_POPUP_JS = """
         (function(){
           try{
             if(window.__streamLinkAdGuard) return;
             window.__streamLinkAdGuard=true;
-            // Los popups window.open no deben abrir otra pestaña ni mandar al usuario a publicidad.
-            window.open=function(){return null;};
+            // Bloquear enlaces publicitarios target=_blank; no reemplazar window.open,
+            // porque algunos reproductores detectan sus funciones nativas.
             document.addEventListener('click',function(ev){
               var node=ev.target && ev.target.closest ? ev.target.closest('a[target="_blank"]') : null;
               if(node && !/\\.(m3u8?|mp4)(?:$|[?#])/i.test(node.href)){
@@ -178,10 +173,14 @@ public class MainActivity extends Activity {
         getPreferences(MODE_PRIVATE).edit().putBoolean("blockAds",adBlockEnabled).apply();
         refreshAdToggle();
         if(adBlockEnabled)injectAdGuard(video);
-        Toast.makeText(this,adBlockEnabled?"Bloqueo de anuncios activado":"Bloqueo desactivado",Toast.LENGTH_SHORT).show();
+        Toast.makeText(this,"Bloqueo "+(adBlockEnabled?"activado":"desactivado")+". Pulsa RECARGAR para aplicar el cambio.",Toast.LENGTH_LONG).show();
       });
       controls.addView(adToggle,new LinearLayout.LayoutParams(0,-2,2));
       bar.addView(controls,new LinearLayout.LayoutParams(-1,-2));
+      Button reload=new Button(this);reload.setText("⟳ RECARGAR PÁGINA");reload.setTextSize(12);
+      reload.setAllCaps(false);
+      reload.setOnClickListener(v->{video.reload();message.setText("Recargando reproductor...");});
+      bar.addView(reload,new LinearLayout.LayoutParams(-1,-2));
       message=new TextView(this);message.setTextColor(Color.WHITE);
       message.setText("Reproduce el vídeo para analizar");
       message.setTextSize(12);message.setPadding(14,0,8,8);
@@ -191,7 +190,12 @@ public class MainActivity extends Activity {
       video=new WebView(this);
       WebSettings w=video.getSettings();w.setJavaScriptEnabled(true);w.setDomStorageEnabled(true);
       w.setJavaScriptCanOpenWindowsAutomatically(false);w.setSupportMultipleWindows(false);
-      w.setMediaPlaybackRequiresUserGesture(true);
+      // Algunos reproductores HLS empiezan el vídeo automáticamente tras cargar el iframe.
+      w.setMediaPlaybackRequiresUserGesture(false);
+      // Sin cookies de terceros, algunos reproductores no inicializan la sesión de vídeo.
+      CookieManager.getInstance().setAcceptCookie(true);
+      CookieManager.getInstance().setAcceptThirdPartyCookies(video,true);
+      w.setDatabaseEnabled(true);
       // Algunos reproductores incrustados en páginas PHP rechazan el sufijo "wv" del navegador.
       try{w.setUserAgentString(w.getUserAgentString().replace("; wv",""));}catch(Exception ignored){}
       // Las listas HLS pueden cargarse desde iframes y service workers.
@@ -210,6 +214,22 @@ public class MainActivity extends Activity {
       if(Build.VERSION.SDK_INT>=26)w.setSafeBrowsingEnabled(true);
       video.setWebChromeClient(new WebChromeClient(){
         @Override public void onProgressChanged(WebView v,int p){if(p==100){injectAdGuard(v);inspect();}}
+        @Override public void onShowCustomView(android.view.View customView,CustomViewCallback callback){
+          if(fullScreenFrame!=null){callback.onCustomViewHidden();return;}
+          videoFullscreenCallback=callback;
+          fullScreenFrame=new android.widget.FrameLayout(MainActivity.this);
+          fullScreenFrame.setBackgroundColor(Color.BLACK);
+          fullScreenFrame.addView(customView,new android.widget.FrameLayout.LayoutParams(-1,-1));
+          setContentView(fullScreenFrame);
+          getWindow().getDecorView().setSystemUiVisibility(
+            android.view.View.SYSTEM_UI_FLAG_FULLSCREEN |
+            android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+            android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        }
+        @Override public void onHideCustomView(){exitVideoFullscreen();}
+        @Override public void onReceivedTitle(WebView view,String text){
+          if(text!=null&&!text.isEmpty()&&scanning)title=text;
+        }
         @Override public boolean onCreateWindow(WebView view,boolean isDialog,boolean isUserGesture,android.os.Message resultMsg){
           if(adBlockEnabled){blocked();return false;}
           return false; // Android WebView integrado: no crear nuevas pestañas externas
@@ -231,15 +251,25 @@ public class MainActivity extends Activity {
           injectAdGuard(v);
           inspect();
         }
+        @Override public void onReceivedError(WebView v,WebResourceRequest req,WebResourceError error){
+          if(req.isForMainFrame()&&scanning){
+            String detail=error==null?"Error desconocido":String.valueOf(error.getDescription());
+            handler.post(()->message.setText("Error al abrir la página: "+detail));
+          }
+        }
+        @Override public void onReceivedHttpError(WebView v,WebResourceRequest req,WebResourceResponse resp){
+          if(req.isForMainFrame()&&scanning){
+            handler.post(()->message.setText("Error HTTP "+resp.getStatusCode()+" de la página. Comprueba el enlace."));
+          }
+        }
         @Override public boolean shouldOverrideUrlLoading(WebView v,WebResourceRequest r){
           String s=r.getUrl().getScheme();
           if(!("http".equalsIgnoreCase(s)||"https".equalsIgnoreCase(s)))return true;
           String url=r.getUrl().toString();
           if(shouldBlock(url)){blocked();return true;}
-          // No abandonar la página abierta por redirecciones publicitarias externas.
-          if(adBlockEnabled&&scanning&&r.isForMainFrame()&&offsiteNavigation(r.getUrl())&&!isStream(url)){
-            blocked();return true;
-          }
+          // Permitir redirecciones HTTPS legítimas del reproductor a dominios externos.
+          // Los dominios publicitarios siguen filtrados por shouldBlock() y
+          // las ventanas nuevas siguen desactivadas mediante WebChromeClient.
           return false;
         }
       });
@@ -250,8 +280,6 @@ public class MainActivity extends Activity {
     private void startBrowse(String url){
       if(!(url.startsWith("http://")||url.startsWith("https://"))){send("window.onNativeError('URL no válida')");return;}
       found.clear();rows.clear();title="Vídeo";adsBlocked=0;
-      Uri origin=Uri.parse(url);
-      startHost=origin.getHost()==null?"":origin.getHost().toLowerCase(Locale.ROOT);
       scanning=true;refreshAdToggle();
       root.removeView(ui);
       if(browserLayout.getParent() instanceof ViewGroup)((ViewGroup)browserLayout.getParent()).removeView(browserLayout);
@@ -280,7 +308,21 @@ public class MainActivity extends Activity {
         message.setText("M3U encontrados: "+found.size());
       }catch(Exception ignored){}
     }
+    private void exitVideoFullscreen(){
+      if(fullScreenFrame==null)return;
+      android.widget.FrameLayout old=fullScreenFrame;
+      fullScreenFrame=null;
+      old.removeAllViews();
+      setContentView(root);
+      getWindow().getDecorView().setSystemUiVisibility(0);
+      if(videoFullscreenCallback!=null){
+        WebChromeClient.CustomViewCallback callback=videoFullscreenCallback;
+        videoFullscreenCallback=null;
+        callback.onCustomViewHidden();
+      }
+    }
     private void closeBrowser(){
+      if(fullScreenFrame!=null)exitVideoFullscreen();
       scanning=false;handler.removeCallbacks(scanLoop);
       video.stopLoading();video.loadUrl("about:blank");
       root.removeView(browserLayout);
@@ -290,7 +332,11 @@ public class MainActivity extends Activity {
       send("window.onNativeCandidates("+JSONObject.quote(a.toString())+")");
       send("window.onNativeMessage("+JSONObject.quote("Análisis completado: "+found.size()+" enlace(s).")+")");
     }
-    @Override public void onBackPressed(){if(scanning){if(video.canGoBack())video.goBack();else closeBrowser();}else super.onBackPressed();}
+    @Override public void onBackPressed(){
+      if(fullScreenFrame!=null){exitVideoFullscreen();return;}
+      if(scanning){if(video.canGoBack())video.goBack();else closeBrowser();}
+      else super.onBackPressed();
+    }
     @Override protected void onDestroy(){scanning=false;handler.removeCallbacks(scanLoop);video.destroy();ui.destroy();super.onDestroy();}
     private byte[] limited(InputStream in)throws IOException{
       ByteArrayOutputStream out=new ByteArrayOutputStream();byte[] b=new byte[8192];int n,total=0;
