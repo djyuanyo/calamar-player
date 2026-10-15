@@ -193,8 +193,8 @@ public class MainActivity extends Activity {
       // Algunos reproductores HLS empiezan el vídeo automáticamente tras cargar el iframe.
       w.setMediaPlaybackRequiresUserGesture(false);
       // Sin cookies de terceros, algunos reproductores no inicializan la sesión de vídeo.
-      CookieManager.getInstance().setAcceptCookie(true);
-      CookieManager.getInstance().setAcceptThirdPartyCookies(video,true);
+      android.webkit.CookieManager.getInstance().setAcceptCookie(true);
+      android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(video,true);
       w.setDatabaseEnabled(true);
       // Algunos reproductores incrustados en páginas PHP rechazan el sufijo "wv" del navegador.
       try{w.setUserAgentString(w.getUserAgentString().replace("; wv",""));}catch(Exception ignored){}
