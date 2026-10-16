@@ -33,7 +33,9 @@ public class MainActivity extends Activity {
     private android.widget.FrameLayout fullScreenFrame;
     private WebChromeClient.CustomViewCallback videoFullscreenCallback;
     private TextView message;
-    private Button adToggle;
+    private Button adToggle,chromeButton,modeButton;
+    private boolean chromeLikeMode=true;
+    private String originalUserAgent="";
     private volatile boolean adBlockEnabled=true;
     private int adsBlocked=0;
     // Solo bloquear redes publicitarias conocidas; los CDN de vídeo no se filtran por nombre.
@@ -143,6 +145,7 @@ public class MainActivity extends Activity {
       getWindow().setStatusBarColor(Color.rgb(10,14,18));
       getWindow().setNavigationBarColor(Color.rgb(10,14,18));
       adBlockEnabled=getPreferences(MODE_PRIVATE).getBoolean("blockAds",true);
+      chromeLikeMode=getPreferences(MODE_PRIVATE).getBoolean("chromeLikeMode",true);
       root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);
       setContentView(root);
       ui=new WebView(this);
@@ -181,6 +184,21 @@ public class MainActivity extends Activity {
       reload.setAllCaps(false);
       reload.setOnClickListener(v->{video.reload();message.setText("Recargando reproductor...");});
       bar.addView(reload,new LinearLayout.LayoutParams(-1,-2));
+      LinearLayout compatibility=new LinearLayout(this);
+      modeButton=new Button(this);modeButton.setAllCaps(false);modeButton.setTextSize(11);
+      modeButton.setOnClickListener(v->{
+        chromeLikeMode=!chromeLikeMode;
+        getPreferences(MODE_PRIVATE).edit().putBoolean("chromeLikeMode",chromeLikeMode).apply();
+        applyBrowserMode();
+        video.reload();
+      });
+      compatibility.addView(modeButton,new LinearLayout.LayoutParams(0,-2,1));
+      chromeButton=new Button(this);
+      chromeButton.setAllCaps(false);chromeButton.setTextSize(11);
+      chromeButton.setText("ABRIR EN CHROME ↗");
+      chromeButton.setOnClickListener(v->openInChrome());
+      compatibility.addView(chromeButton,new LinearLayout.LayoutParams(0,-2,1));
+      bar.addView(compatibility,new LinearLayout.LayoutParams(-1,-2));
       message=new TextView(this);message.setTextColor(Color.WHITE);
       message.setText("Reproduce el vídeo para analizar");
       message.setTextSize(12);message.setPadding(14,0,8,8);
@@ -196,8 +214,12 @@ public class MainActivity extends Activity {
       android.webkit.CookieManager.getInstance().setAcceptCookie(true);
       android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(video,true);
       w.setDatabaseEnabled(true);
-      // Algunos reproductores incrustados en páginas PHP rechazan el sufijo "wv" del navegador.
-      try{w.setUserAgentString(w.getUserAgentString().replace("; wv",""));}catch(Exception ignored){}
+      // Algunas páginas de vídeo sirven un reproductor distinto si detectan un UA de WebView.
+      // Usa un UA de Chrome móvil conservando la versión Chromium instalada; evita un UA falso fijo.
+      originalUserAgent=w.getUserAgentString();
+      applyBrowserMode();
+      w.setUseWideViewPort(true);
+      w.setLoadWithOverviewMode(true);
       // Las listas HLS pueden cargarse desde iframes y service workers.
       if(Build.VERSION.SDK_INT>=24)try{
         ServiceWorkerController.getInstance().setServiceWorkerClient(new ServiceWorkerClient(){
@@ -254,7 +276,10 @@ public class MainActivity extends Activity {
         @Override public void onReceivedError(WebView v,WebResourceRequest req,WebResourceError error){
           if(req.isForMainFrame()&&scanning){
             String detail=error==null?"Error desconocido":String.valueOf(error.getDescription());
-            handler.post(()->message.setText("Error al abrir la página: "+detail));
+            handler.post(()->{
+              message.setText("Conexión fallida ("+detail+"). Prueba MODO WEBVIEW o ABRIR EN CHROME.");
+              chromeButton.setText("ABRIR EN CHROME ↗");
+            });
           }
         }
         @Override public void onReceivedHttpError(WebView v,WebResourceRequest req,WebResourceResponse resp){
@@ -275,6 +300,34 @@ public class MainActivity extends Activity {
       });
       browserLayout.addView(video,new LinearLayout.LayoutParams(-1,0,1));
     }
+    private void applyBrowserMode(){
+      if(video==null)return;
+      String ua=originalUserAgent;
+      if(ua==null||ua.isEmpty())ua=video.getSettings().getUserAgentString();
+      if(chromeLikeMode){
+        ua=ua.replace("; wv","").replace("Version/4.0 ","").replace(" Version/4.0","");
+      }
+      video.getSettings().setUserAgentString(ua);
+      if(modeButton!=null)modeButton.setText(chromeLikeMode?"MODO: CHROME":"MODO: WEBVIEW");
+    }
+    private void openInChrome(){
+      String url=video==null?null:video.getUrl();
+      if(url==null || !(url.startsWith("http://")||url.startsWith("https://"))){
+        Toast.makeText(this,"No hay una URL válida para abrir",Toast.LENGTH_SHORT).show();
+        return;
+      }
+      Intent intent=new Intent(Intent.ACTION_VIEW,Uri.parse(url));
+      // Chrome puede abrirla fuera de la app; por diseño no podemos capturar sus solicitudes.
+      intent.setPackage("com.android.chrome");
+      try{
+        startActivity(intent);
+      }catch(android.content.ActivityNotFoundException ex){
+        intent.setPackage(null);
+        try{startActivity(intent);}catch(Exception e){
+          Toast.makeText(this,"No se encontró un navegador compatible",Toast.LENGTH_LONG).show();
+        }
+      }
+    }
     private boolean isStream(String s){return (s.startsWith("https://")||s.startsWith("http://"))&&STREAM.matcher(s).find();}
     private void send(String js){handler.post(()->ui.evaluateJavascript(js,null));}
     private void startBrowse(String url){
@@ -284,7 +337,7 @@ public class MainActivity extends Activity {
       root.removeView(ui);
       if(browserLayout.getParent() instanceof ViewGroup)((ViewGroup)browserLayout.getParent()).removeView(browserLayout);
       root.addView(browserLayout,new LinearLayout.LayoutParams(-1,-1));
-      message.setText("Reproduce el vídeo · buscando M3U/M3U8");
+      message.setText("Reproduce el vídeo · buscando M3U/M3U8. Si no abre: cambia MODO o usa Chrome (sin captura en Chrome).");
       video.loadUrl(url);handler.postDelayed(scanLoop,2800);
     }
     private void inspect(){
