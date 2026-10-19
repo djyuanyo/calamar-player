@@ -310,6 +310,19 @@ public class MainActivity extends Activity {
       video.getSettings().setUserAgentString(ua);
       if(modeButton!=null)modeButton.setText(chromeLikeMode?"MODO: CHROME":"MODO: WEBVIEW");
     }
+
+    private void playDirect(String streamUrl){
+      if(streamUrl==null)return;
+      Uri target=Uri.parse(streamUrl.trim());
+      String scheme=target.getScheme();
+      if(!("https".equalsIgnoreCase(scheme)||"http".equalsIgnoreCase(scheme))){
+        Toast.makeText(this,"La URL debe comenzar con http o https",Toast.LENGTH_LONG).show();
+        return;
+      }
+      Intent player=new Intent(this,PlayerActivity.class);
+      player.putExtra("stream_url",streamUrl.trim());
+      startActivity(player);
+    }
     private void openInChrome(){
       String url=video==null?null:video.getUrl();
       if(url==null || !(url.startsWith("http://")||url.startsWith("https://"))){
@@ -429,6 +442,7 @@ public class MainActivity extends Activity {
     }
     private final class Bridge{
       @JavascriptInterface public void browse(String url){handler.post(()->startBrowse(url));}
+      @JavascriptInterface public void playDirect(String url){handler.post(()->playDirect(url));}
       @JavascriptInterface public void importRemote(String url){importUrl(url);}
       @JavascriptInterface public void importFile(){handler.post(()->{
         Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.setType("*/*");i.addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(i,PICK);
