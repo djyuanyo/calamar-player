@@ -189,7 +189,7 @@ public class PlayerActivity extends Activity {
         if(e.errorCode==PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ||
            e.errorCode==PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED)
            return "La respuesta no es una lista HLS válida. El servidor podría estar enviando HTML u otra página en lugar del M3U8.";
-        return "Error de reproducción ("+e.errorCodeName+"). El servidor puede requerir una sesión válida, o el formato no es compatible.";
+        return "Error de reproducción ("+e.getErrorCodeName()+"). El servidor puede requerir una sesión válida, o el formato no es compatible.";
     }
     private void releasePlayer(){if(player!=null){player.release();player=null;}}
     @Override protected void onStop(){releasePlayer();super.onStop();}
