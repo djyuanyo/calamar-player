@@ -15,6 +15,8 @@ import android.util.Base64;
 import android.view.ViewGroup;
 import android.webkit.*;
 import android.widget.*;
+import androidx.browser.customtabs.CustomTabsIntent;
+import androidx.browser.customtabs.CustomTabColorSchemeParams;
 import org.json.*;
 import java.net.*;
 import java.io.*;
@@ -33,7 +35,10 @@ public class MainActivity extends Activity {
     private android.widget.FrameLayout fullScreenFrame;
     private WebChromeClient.CustomViewCallback videoFullscreenCallback;
     private TextView message;
-    private Button adToggle,chromeButton,modeButton;
+    private Button adToggle,chromeButton,modeButton,autoChromeButton;
+    private boolean autoChromeFallbackEnabled=true;
+    private boolean customTabOpened=false,customTabQueued=false;
+    private String activeBrowserUrl="";
     private boolean chromeLikeMode=true;
     private String originalUserAgent="";
     private volatile boolean adBlockEnabled=true;
@@ -146,6 +151,7 @@ public class MainActivity extends Activity {
       getWindow().setNavigationBarColor(Color.rgb(10,14,18));
       adBlockEnabled=getPreferences(MODE_PRIVATE).getBoolean("blockAds",true);
       chromeLikeMode=getPreferences(MODE_PRIVATE).getBoolean("chromeLikeMode",true);
+      autoChromeFallbackEnabled=getPreferences(MODE_PRIVATE).getBoolean("autoChromeFallback",true);
       root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);
       setContentView(root);
       ui=new WebView(this);
@@ -195,10 +201,22 @@ public class MainActivity extends Activity {
       compatibility.addView(modeButton,new LinearLayout.LayoutParams(0,-2,1));
       chromeButton=new Button(this);
       chromeButton.setAllCaps(false);chromeButton.setTextSize(11);
-      chromeButton.setText("ABRIR EN CHROME ↗");
-      chromeButton.setOnClickListener(v->openInChrome());
+      chromeButton.setText("🌐 CHROME REAL ↗");
+      chromeButton.setOnClickListener(v->openChromeCustomTab(activeBrowserUrl,false));
       compatibility.addView(chromeButton,new LinearLayout.LayoutParams(0,-2,1));
       bar.addView(compatibility,new LinearLayout.LayoutParams(-1,-2));
+      autoChromeButton=new Button(this);
+      autoChromeButton.setAllCaps(false);autoChromeButton.setTextSize(11);
+      autoChromeButton.setOnClickListener(v->{
+        autoChromeFallbackEnabled=!autoChromeFallbackEnabled;
+        getPreferences(MODE_PRIVATE).edit().putBoolean("autoChromeFallback",autoChromeFallbackEnabled).apply();
+        refreshChromeFallbackToggle();
+        Toast.makeText(this,autoChromeFallbackEnabled?
+          "Chrome real se abrirá automáticamente si falla WebView.":
+          "Fallback desactivado: usa CHROME REAL manualmente.",Toast.LENGTH_SHORT).show();
+      });
+      bar.addView(autoChromeButton,new LinearLayout.LayoutParams(-1,-2));
+      refreshChromeFallbackToggle();
       message=new TextView(this);message.setTextColor(Color.WHITE);
       message.setText("Reproduce el vídeo para analizar");
       message.setTextSize(12);message.setPadding(14,0,8,8);
@@ -236,6 +254,20 @@ public class MainActivity extends Activity {
       if(Build.VERSION.SDK_INT>=26)w.setSafeBrowsingEnabled(true);
       video.setWebChromeClient(new WebChromeClient(){
         @Override public void onProgressChanged(WebView v,int p){if(p==100){injectAdGuard(v);inspect();}}
+        @Override public boolean onConsoleMessage(ConsoleMessage consoleMessage){
+          if(scanning && autoChromeFallbackEnabled && consoleMessage!=null){
+            String log=consoleMessage.message();
+            if(log!=null){
+              String lower=log.toLowerCase(Locale.ROOT);
+              // Console errors from unrelated ad/tracking scripts must NOT trigger fallback.
+              if(lower.contains("cors") &&
+                (lower.contains(".m3u8")||lower.contains("hls")||lower.contains("video")||lower.contains("manifest"))){
+                scheduleChromeFallback(activeBrowserUrl,"El reproductor indica un error CORS.");
+              }
+            }
+          }
+          return super.onConsoleMessage(consoleMessage);
+        }
         @Override public void onShowCustomView(android.view.View customView,CustomViewCallback callback){
           if(fullScreenFrame!=null){callback.onCustomViewHidden();return;}
           videoFullscreenCallback=callback;
@@ -274,17 +306,35 @@ public class MainActivity extends Activity {
           inspect();
         }
         @Override public void onReceivedError(WebView v,WebResourceRequest req,WebResourceError error){
+          if(!req.isForMainFrame() && scanning && autoChromeFallbackEnabled){
+            String subUrl=req.getUrl()==null?"":req.getUrl().toString();
+            if(isStream(subUrl) || subUrl.matches("(?i).*[/]api[/]player[/].*")){
+              scheduleChromeFallback(activeBrowserUrl,"Error de carga en el reproductor incrustado.");
+            }
+          }
           if(req.isForMainFrame()&&scanning){
             String detail=error==null?"Error desconocido":String.valueOf(error.getDescription());
             handler.post(()->{
-              message.setText("Conexión fallida ("+detail+"). Prueba MODO WEBVIEW o ABRIR EN CHROME.");
-              chromeButton.setText("ABRIR EN CHROME ↗");
+              if(!scanning)return;
+              message.setText("Conexión WebView fallida ("+detail+"). "+
+                (autoChromeFallbackEnabled?"Abriendo Chrome real…":"Pulsa CHROME REAL."));
+              if(autoChromeFallbackEnabled){
+                String failed=req.getUrl()==null?activeBrowserUrl:req.getUrl().toString();
+                scheduleChromeFallback(failed,"Fallo de conexión en WebView: "+detail);
+              }
             });
           }
         }
         @Override public void onReceivedHttpError(WebView v,WebResourceRequest req,WebResourceResponse resp){
           if(req.isForMainFrame()&&scanning){
-            handler.post(()->message.setText("Error HTTP "+resp.getStatusCode()+" de la página. Comprueba el enlace."));
+            handler.post(()->{
+              if(!scanning)return;
+              int code=resp.getStatusCode();
+              message.setText("WebView recibió HTTP "+code+".");
+              if(autoChromeFallbackEnabled && (code==401||code==403||code==429||code>=500)){
+                scheduleChromeFallback(activeBrowserUrl,"HTTP "+code+" en WebView.");
+              }
+            });
           }
         }
         @Override public boolean shouldOverrideUrlLoading(WebView v,WebResourceRequest r){
@@ -308,7 +358,7 @@ public class MainActivity extends Activity {
         ua=ua.replace("; wv","").replace("Version/4.0 ","").replace(" Version/4.0","");
       }
       video.getSettings().setUserAgentString(ua);
-      if(modeButton!=null)modeButton.setText(chromeLikeMode?"MODO: CHROME":"MODO: WEBVIEW");
+      if(modeButton!=null)modeButton.setText(chromeLikeMode?"WEBVIEW: UA CHROME":"WEBVIEW: ORIGINAL");
     }
 
     private void playDirect(String streamUrl){
@@ -323,22 +373,56 @@ public class MainActivity extends Activity {
       player.putExtra("stream_url",streamUrl.trim());
       startActivity(player);
     }
-    private void openInChrome(){
-      String url=video==null?null:video.getUrl();
-      if(url==null || !(url.startsWith("http://")||url.startsWith("https://"))){
-        Toast.makeText(this,"No hay una URL válida para abrir",Toast.LENGTH_SHORT).show();
-        return;
-      }
-      Intent intent=new Intent(Intent.ACTION_VIEW,Uri.parse(url));
-      // Chrome puede abrirla fuera de la app; por diseño no podemos capturar sus solicitudes.
-      intent.setPackage("com.android.chrome");
-      try{
-        startActivity(intent);
-      }catch(android.content.ActivityNotFoundException ex){
-        intent.setPackage(null);
-        try{startActivity(intent);}catch(Exception e){
-          Toast.makeText(this,"No se encontró un navegador compatible",Toast.LENGTH_LONG).show();
+
+    private void refreshChromeFallbackToggle(){
+      if(autoChromeButton!=null)autoChromeButton.setText(
+        autoChromeFallbackEnabled?"⚡ FALLBACK AUTOMÁTICO A CHROME: ON":
+        "⚡ FALLBACK AUTOMÁTICO A CHROME: OFF");
+    }
+    private void scheduleChromeFallback(String url,String reason){
+      if(!autoChromeFallbackEnabled||!scanning||customTabOpened||customTabQueued)return;
+      customTabQueued=true;
+      handler.postDelayed(()->{
+        customTabQueued=false;
+        if(autoChromeFallbackEnabled && scanning && !customTabOpened){
+          openChromeCustomTab(url,true);
         }
+      },650);
+    }
+    private void openChromeCustomTab(String url,boolean automatic){
+      if(url==null||!(url.startsWith("https://")||url.startsWith("http://"))){
+        url=activeBrowserUrl;
+      }
+      if(url==null||!(url.startsWith("https://")||url.startsWith("http://"))){
+        Toast.makeText(this,"URL de página inválida.",Toast.LENGTH_LONG).show();return;
+      }
+      if(customTabOpened && automatic)return;
+      Uri target=Uri.parse(url);
+      try{
+        CustomTabColorSchemeParams colors = new CustomTabColorSchemeParams.Builder()
+          .setToolbarColor(Color.rgb(12,17,22))
+          .build();
+        CustomTabsIntent tab=new CustomTabsIntent.Builder()
+          .setShowTitle(true)
+          .setDefaultColorSchemeParams(colors)
+          .build();
+        // Chrome real shares the browser's own cookies/session and CORS policies.
+        tab.intent.setPackage("com.android.chrome");
+        try{
+          tab.launchUrl(this,target);
+        }catch(android.content.ActivityNotFoundException ex){
+          // Use another compatible installed Custom Tabs provider if Chrome is absent.
+          tab.intent.setPackage(null);
+          tab.launchUrl(this,target);
+        }
+        customTabOpened=true;scanning=false;
+        handler.removeCallbacks(scanLoop);
+        message.setText("Chrome real abierto. En esa pestaña no se pueden capturar "+
+          "las peticiones M3U8; vuelve a la app para analizar otra página.");
+        if(automatic)Toast.makeText(this,"WebView falló. Abriendo Chrome real.",Toast.LENGTH_LONG).show();
+      }catch(Exception ex){
+        if(!automatic)Toast.makeText(this,"No se pudo abrir Chrome: "+ex.getMessage(),Toast.LENGTH_LONG).show();
+        message.setText("Error al abrir navegador externo. Puedes probar otro navegador.");
       }
     }
     private boolean isStream(String s){return (s.startsWith("https://")||s.startsWith("http://"))&&STREAM.matcher(s).find();}
@@ -346,11 +430,12 @@ public class MainActivity extends Activity {
     private void startBrowse(String url){
       if(!(url.startsWith("http://")||url.startsWith("https://"))){send("window.onNativeError('URL no válida')");return;}
       found.clear();rows.clear();title="Vídeo";adsBlocked=0;
+      activeBrowserUrl=url;customTabOpened=false;customTabQueued=false;
       scanning=true;refreshAdToggle();
       root.removeView(ui);
       if(browserLayout.getParent() instanceof ViewGroup)((ViewGroup)browserLayout.getParent()).removeView(browserLayout);
       root.addView(browserLayout,new LinearLayout.LayoutParams(-1,-1));
-      message.setText("Reproduce el vídeo · buscando M3U/M3U8. Si no abre: cambia MODO o usa Chrome (sin captura en Chrome).");
+      message.setText("Analizador WebView · buscando M3U/M3U8. Si falla, se abre Chrome real automáticamente.");
       video.loadUrl(url);handler.postDelayed(scanLoop,2800);
     }
     private void inspect(){
@@ -389,7 +474,7 @@ public class MainActivity extends Activity {
     }
     private void closeBrowser(){
       if(fullScreenFrame!=null)exitVideoFullscreen();
-      scanning=false;handler.removeCallbacks(scanLoop);
+      scanning=false;customTabQueued=false;handler.removeCallbacks(scanLoop);
       video.stopLoading();video.loadUrl("about:blank");
       root.removeView(browserLayout);
       if(ui.getParent() instanceof ViewGroup)((ViewGroup)ui.getParent()).removeView(ui);
@@ -443,6 +528,7 @@ public class MainActivity extends Activity {
     private final class Bridge{
       @JavascriptInterface public void browse(String url){handler.post(()->startBrowse(url));}
       @JavascriptInterface public void playDirect(String url){handler.post(()->playDirect(url));}
+      @JavascriptInterface public void openChromeTab(String url){handler.post(()->openChromeCustomTab(url,false));}
       @JavascriptInterface public void importRemote(String url){importUrl(url);}
       @JavascriptInterface public void importFile(){handler.post(()->{
         Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.setType("*/*");i.addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(i,PICK);
